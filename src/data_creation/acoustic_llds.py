@@ -50,6 +50,8 @@ class AcousticLLDs:
 
 
 if __name__ == "__main__":
+    os.chdir("..")
+    os.chdir("..")
     lldss = "acoustic" # alias for mfcc + rastaplp
     header_rowss = None  # set to None if there is no header, set to 0 if first row is header
     redundant_colss = 0  # set to x to skip first x columns

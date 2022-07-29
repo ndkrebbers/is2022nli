@@ -55,13 +55,13 @@ class Wav2Vec2Extractor:
             outputs = self.model(inputs)
         last_layer = outputs.last_hidden_state
 
-        # print("Taking mean over every 10 embeddings in each utterance.")
-        splits = torch.split(last_layer, 10, 1)
-        mean_10 = [torch.unsqueeze(torch.mean(x, dim=1), dim=1) for x in splits]
-        mean_10_cat = torch.cat(mean_10, dim=1)
-        mean_10_cat_list = mean_10_cat.tolist()
+        # print("Taking mean over every 5 embeddings in each utterance.")
+        splits = torch.split(last_layer, 5, 1)
+        mean_5 = [torch.unsqueeze(torch.mean(x, dim=1), dim=1) for x in splits]
+        mean_5_cat = torch.cat(mean_5, dim=1)
+        mean_5_cat_list = mean_5_cat.tolist()
 
-        outputs = np.array(mean_10_cat_list[0], dtype=np.float32)
+        outputs = np.array(mean_5_cat_list[0], dtype=np.float32)
         # outputs = [np.array(x, dtype=np.float32) for x in mean_10_cat_list]
 
         return outputs
@@ -75,6 +75,8 @@ class Wav2Vec2Extractor:
 
 
 if __name__ == "__main__":
+    os.chdir("..")
+    os.chdir("..")
     directory = "data/audio_wav/"
     w = Wav2Vec2Extractor(directory)
     w.collect_embeddings()

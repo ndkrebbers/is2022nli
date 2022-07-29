@@ -5,7 +5,7 @@ from sklearn import preprocessing
 from os import path
 from time import perf_counter
 import datetime
-
+import os
 
 class EmbeddingPCA:
     def __init__(self, bert_model: str, words_or_sentences: str, pca_components: int, overwrite_file: bool,
@@ -19,7 +19,7 @@ class EmbeddingPCA:
         self.overwrite = overwrite_file
         self.acoustics = include_acoustics
 
-    def pca_fit(self, subsamples=4):
+    def pca_fit(self, subsamples=1):
         """
         Create principal components using the training set
         :return:
@@ -46,7 +46,11 @@ class EmbeddingPCA:
         # utterance_arrays = self.tensor_to_numpy(utterance_tensors)
 
         utterance_arrays = utterance_arrays
-        all_word_embeddings = np.concatenate(utterance_arrays, axis=0)
+        if self.bert_model == "bow" or self.bert_model == "tfidf":
+            all_word_embeddings = utterance_arrays
+        else:
+            all_word_embeddings = np.concatenate(utterance_arrays, axis=0)
+
         if self.acoustics == "_acoustic_llds" or self.acoustics == "_compare_llds" or self.acoustics == "_llds" or self.acoustics == "_wav2vec2":
             all_word_embeddings = all_word_embeddings[0::subsamples, ]
 
@@ -90,7 +94,7 @@ class EmbeddingPCA:
                 with open(f"data/embeddings_pickle/acoustic_{data_set}_{self.word_or_sent}{self.acoustics}.pickle", 'rb') as f:
                     utterance_acoustics = pickle.load(f)
             else:
-                with open(f"data/acoustics_pickle/train{self.acoustics}.pickle", 'rb') as f:
+                with open(f"data/acoustics_pickle/{data_set}{self.acoustics}.pickle", 'rb') as f:
                     utterance_acoustics = pickle.load(f)
 
             #with open(f"data/acoustics_pickle/{data_set}{self.acoustics}.pickle", 'rb') as f:
@@ -104,13 +108,24 @@ class EmbeddingPCA:
                 utterance_arrays = utterance_acoustics
 
         utterance_arrays = utterance_arrays
-        if utterance_arrays[0].shape[1] < self.nr_of_pcs:
-            print("Warning: your number of pca eigenvectors is larger than the number of features in your data.")
+        # if utterance_arrays[0].shape[1] < self.nr_of_pcs:
+        #     print("Warning: your number of pca eigenvectors is larger than the number of features in your data.")
         # utterance_arrays = self.tensor_to_numpy(utterance_tensors)
         pca_utterance_embeddings = self.transform_utterance(utterance_arrays)
-        pca_utterance_embeddings = [x[:, : self.nr_of_pcs] for x in pca_utterance_embeddings]
 
-        self.explained_variance = sum(self.pca.explained_variance_ratio_[: self.nr_of_pcs + 1])
+        if self.bert_model == "bow" or self.bert_model == "tfidf":
+            pca_utterance_embeddings = pca_utterance_embeddings[:, : self.nr_of_pcs]
+        else:
+            pca_utterance_embeddings = [x[:, : self.nr_of_pcs] for x in pca_utterance_embeddings]
+
+        self.explained_variance = sum(self.pca.explained_variance_ratio_[: self.nr_of_pcs])
+
+        # print(sum(self.pca.explained_variance_ratio_[: 200]))
+        # print(sum(self.pca.explained_variance_ratio_[: 250]))
+        # print(sum(self.pca.explained_variance_ratio_[: 300]))
+        # print(sum(self.pca.explained_variance_ratio_[: 350]))
+
+
 
         with open(f"data/embeddings_pickle/{self.bert_model}_{data_set}_{self.word_or_sent}{self.acoustics}_{self.nr_of_pcs}pca"
                   f".pickle", "wb") as f:
@@ -137,6 +152,11 @@ class EmbeddingPCA:
         :return: reduced embeddings
         """
         pca_utterance_embeddings = []
+        if self.bert_model == "bow" or self.bert_model == "tfidf":
+            utterance_scaled = self.scaler.transform(utterance_arrays)
+            utterance_reduced = self.pca.transform(utterance_scaled)
+            return utterance_reduced
+
         for utterance in utterance_arrays:
             utterance_scaled = self.scaler.transform(utterance)
             utterance_reduced = self.pca.transform(utterance_scaled)
@@ -146,7 +166,9 @@ class EmbeddingPCA:
 
 
 if __name__ == "__main__":
-    pca = EmbeddingPCA(bert_model="bert", words_or_sentences="words", pca_components=300, overwrite_file=True)
+    os.chdir("..")
+    pca = EmbeddingPCA(bert_model="bert", words_or_sentences="words", pca_components=400, overwrite_file=False)
     pca.pca_fit()
     pca.pca_transform(data_set="train")
     pca.pca_transform(data_set="devel")
+    pca.pca_transform(data_set="test")

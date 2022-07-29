@@ -4,10 +4,12 @@ from sklearn.mixture import GaussianMixture
 from os import path
 from time import perf_counter
 import datetime
+import os
+from sklearn.cluster import KMeans
 
 
 class FisherVector:
-    def __init__(self, bert_model: str, data_extension: str, gmm_components: int, acoustics: str = ""):
+    def __init__(self, bert_model: str, data_extension: str, gmm_components: int, acoustics: str = "", vlad=False):
         with open(f"data/embeddings_pickle/{bert_model}_train_words{acoustics}_{data_extension}.pickle", "rb") as f:
             self.train_data = pickle.load(f)
         self.gmm_components = gmm_components
@@ -15,9 +17,10 @@ class FisherVector:
         self.bert_model = bert_model
         self.extension = data_extension
         self.acoustics = acoustics
+        self.vlad = vlad
         self.size = 0
 
-    def fit_gmm(self, subsamples=4, overwrite=False):
+    def fit_gmm(self, subsamples=1, overwrite=False):
         """
         Fit the gmm to the training data, load pickle if gmm is already made
         :return:
@@ -57,6 +60,33 @@ class FisherVector:
                   f"{self.gmm_components}gmm.pickle", "wb") as f:
             pickle.dump(self.gmm, f)
 
+    def fit_kmeans(self):
+        all_utterance_embeddings = []
+        for utt in self.train_data:
+            all_utterance_embeddings.append(utt)
+        all_utterance_embeddings = np.concatenate(all_utterance_embeddings, axis=0)
+
+        # Subsampling
+        all_utterance_embeddings = all_utterance_embeddings[0::10]
+
+        n_clusters = 1000
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, verbose=1).fit(all_utterance_embeddings)
+
+        for data in ["train", "devel", "test"]:
+            with open(f"data/embeddings_pickle/{self.bert_model}_{data}_words{self.acoustics}_{self.extension}.pickle", "rb") as f:
+                embeddings = pickle.load(f)
+
+            count_list = []
+            for utt in embeddings:
+                preds = kmeans.predict(utt)
+                counts = np.bincount(preds, minlength=n_clusters)
+                count_list.append(counts)
+            q_sum = np.array(count_list)
+
+            with open(f"data/embeddings_pickle/bert_{data}_bow.pickle", "wb") as f:
+                pickle.dump(q_sum, f)
+        print("hello")
+
     def compute_fv(self):
         """
         Convert arbitrary length utterance representation to fixed length fisher vector.
@@ -75,10 +105,15 @@ class FisherVector:
             fv_encodings = np.array(fv_encodings)
 
             self.size = fv_encodings.shape[1]
-
-            with open(f"data/embeddings_pickle/{self.bert_model}_{data}_words{self.acoustics}_{self.extension}_"
-                      f"{self.gmm_components}gmm_fv.pickle", "wb") as f:
-                pickle.dump(fv_encodings, f)
+            
+            if self.vlad:	
+                with open(f"data/embeddings_pickle/{self.bert_model}_{data}_words{self.acoustics}_{self.extension}_"
+            	f"{self.gmm_components}gmm_vlad.pickle", "wb") as f:
+                    pickle.dump(fv_encodings, f)
+            else:
+                with open(f"data/embeddings_pickle/{self.bert_model}_{data}_words{self.acoustics}_{self.extension}_"
+                f"{self.gmm_components}gmm_fv.pickle", "wb") as f:
+                    pickle.dump(fv_encodings, f)
 
     def fisher_vector(self, xx):
         """
@@ -108,12 +143,39 @@ class FisherVector:
             + 2 * Q_xx * self.gmm.means_)
 
         # Merge derivatives into a vector.
-        arr = np.array((d_mu.flatten(), d_sigma.flatten()))
-        fv = arr.flatten(order="F")
-        return fv
+        
+        if self.vlad:
+            arr = np.hstack(d_mu.flatten())
+            # TODO set name to VLAD instead of FV in filename
+        else:
+            arr = np.hstack((d_mu.flatten(), d_sigma.flatten())) # TODO Change this to switch between VLAD and FV
 
+#        fv = arr.flatten(order="F")  # Use this order to create 112233 type of vector instead of 123123, to group gmm components
+
+        return arr
+
+
+def component_indices(pca_comp, gmm_comp):
+    tmp_arr = np.zeros((1, gmm_comp * pca_comp))
+    for i in range(gmm_comp):
+        start_ind = i * pca_comp
+        end_ind = (i + 1) * pca_comp
+        tmp_arr[0, start_ind:end_ind] = [i] * (end_ind - start_ind)
+
+    arr2 = np.array((tmp_arr.flatten(), tmp_arr.flatten()))
+    order = arr2.flatten(order="F")
+
+    return order
 
 if __name__ == '__main__':
-    fish_v = FisherVector(bert_model="bert", data_extension="400pca", gmm_components=64)
-    fish_v.fit_gmm()
+    os.chdir("..")
+    fish_v = FisherVector(bert_model="acoustic", data_extension="wav2vec2_400pca", gmm_components=128, vlad=True)
+    # fish_v.fit_kmeans()
+    fish_v.fit_gmm(overwrite=False, subsamples=1)
     fish_v.compute_fv()
+    # fff = fish_v.return_order([1, 1, 2, 2, 3, 3])
+    # print(fff)
+
+
+    # fish_v.fit_gmm()
+    # fish_v.compute_fv()

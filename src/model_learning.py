@@ -1,30 +1,52 @@
 from typing import Tuple
+import os
 
 # import src.elm_kernel as elm
-import pandas as pd
 import numpy as np
 import pickle
 from sklearn import preprocessing
-from sklearn.metrics import recall_score
-from sklearn.svm import SVC
-from sklearn.model_selection import cross_val_score
+from sklearn.metrics import recall_score, accuracy_score
+# from sklearn.svm import SVC
+# from sklearn.model_selection import cross_val_score
 from sklearn.metrics import pairwise
-import statistics
-from operator import itemgetter
+# import statistics
+from src.configuration import Config
+from src.data_loading import DataLoader
+
+from numpy.random import default_rng
+from src import nli_tools
+import scipy.stats as stats
 
 
 class ELM:
-    def __init__(self, c=1, weighted=False, kernel='linear'):
+    def __init__(self, x_train, x_test, weighted=False, kernel='linear'):
         super(self.__class__, self).__init__()
 
         assert kernel in ["rbf", "linear"]
         self.x_train = []
-        self.C = c
+
         self.weighted = weighted
         self.beta = []
         self.kernel = kernel
+        self.kernel_func_train = self.kernel_train(x_train)
+        self.kernel_func_test = self.kernel_test(x_train, x_test)
 
-    def fit(self, x_train, y_train):
+    def kernel_train(self, x_train):
+        print(self.kernel)
+        if self.kernel == 'rbf':
+            kernel_func = pairwise.rbf_kernel(x_train)
+        else:  # kernel == linear
+            kernel_func = pairwise.linear_kernel(x_train)
+        return kernel_func
+
+    def kernel_test(self, x_train, x_test):
+        if self.kernel == 'rbf':
+            kernel_func = pairwise.rbf_kernel(x_test, x_train)
+        else:  # kernel == linear
+            kernel_func = pairwise.linear_kernel(x_test, x_train)
+        return kernel_func
+
+    def fit(self, x_train, y_train, c):
         """
         Calculate beta using kernel.
         :param x_train: features of train set
@@ -36,11 +58,6 @@ class ELM:
         n = len(x_train)
         y_one_hot = np.eye(class_num)[y_train]
 
-        if self.kernel == 'rbf':
-            kernel_func = pairwise.rbf_kernel(x_train)
-        else:  # kernel == linear
-            kernel_func = pairwise.linear_kernel(x_train)
-
         if self.weighted:
             W = np.zeros((n, n))
             hist = np.zeros(class_num)
@@ -49,10 +66,11 @@ class ELM:
             hist = 1 / hist
             for i in range(len(y_train)):
                 W[i, i] = hist[y_train[i]]
-            beta = np.matmul(np.linalg.inv(np.matmul(W, kernel_func) +
-                                           np.identity(n) / self.C), np.matmul(W, y_one_hot))
+            beta = np.matmul(np.linalg.inv(np.matmul(W, self.kernel_func_train) +
+                                           np.identity(n) / c), np.matmul(W, y_one_hot))
         else:
-            beta = np.matmul(np.linalg.inv(kernel_func + np.identity(n) / self.C), y_one_hot)
+            beta = np.matmul(np.linalg.inv(
+                self.kernel_func_train + np.identity(n) / c), y_one_hot)
         self.beta = beta
 
     def predict(self, x_test):
@@ -61,11 +79,11 @@ class ELM:
         :param x_test: features of new data
         :return: class probabilities of new data
         """
-        if self.kernel == 'rbf':
-            kernel_func = pairwise.rbf_kernel(x_test, self.x_train)
-        else:  # kernel == linear
-            kernel_func = pairwise.linear_kernel(x_test, self.x_train)
-        pred = np.matmul(kernel_func, self.beta)
+        # if self.kernel == 'rbf':
+        #    kernel_func = pairwise.rbf_kernel(x_test, self.x_train)
+        # else:  # kernel == linear
+        #    kernel_func = pairwise.linear_kernel(x_test, self.x_train)
+        pred = np.matmul(self.kernel_func_test, self.beta)
         return pred
 
     # def normalize_data(self, feature_level: str = None, value_level: str = None,
@@ -103,42 +121,107 @@ class ELM:
     #     """
     #     return np.multiply(np.sign(z), np.power(np.abs(z), a))
 
+
+def class_weighted_score_fusion(y_true: list, cp_a: np.array, cp_b: np.array, nr_distributions=1000):
+    nr_distributions = nr_distributions
+    print(f"Using {nr_distributions} uniform distributions.")
+
+    lower, upper = 0, 1
+    mu, sigma = 0.5, 0.1
+    X = stats.truncnorm(
+        (lower - mu) / sigma, (upper - mu) / sigma, loc=mu, scale=sigma)
+    np.random.seed(42)
+    weights = X.rvs((nr_distributions, 11))
+
+    # rng = default_rng(42)
+    # weights = rng.uniform(low=0.0, high=1.0, size=(nr_distributions, 11))
+    weights = weights.round(3)
+
+    best_uar = 0
+    best_dist = []
+    best_pred = []
+
+    for dist in weights:
+        arr = np.tile(dist, (cp_a.shape[0], 1))
+        neg_dist = np.subtract(1, dist)
+        neg_ar = np.tile(neg_dist, (cp_a.shape[0], 1))
+        fused_confidences = np.multiply(arr, cp_a) + np.multiply(neg_ar, cp_b)
+        y_pred = fused_confidences.argmax(axis=-1)
+        uar = recall_score(y_true, y_pred, average="macro")
+        # TODO CHANGE BACK
+        # uar = accuracy_score(y_true, y_pred)
+        if uar > best_uar:
+            best_uar = uar
+            best_dist = dist
+            best_pred = y_pred
+
+    print(
+        f"Best score of {round(best_uar, 4) * 100}%  UAR is found using dist={best_dist}.")
+    nli_tools.save_process_pickle(best_dist, "best_distribution")
+    return best_pred
+
+def test_class_weighted_score_fusion(y_true, cp_a: np.array, cp_b: np.array):
+    dist = nli_tools.load_process_pickle("best_distribution")
+    arr = np.tile(dist, (cp_a.shape[0], 1))
+    neg_dist = np.subtract(1, dist)
+    neg_ar = np.tile(neg_dist, (cp_a.shape[0], 1))
+    fused_confidences = np.multiply(arr, cp_a) + np.multiply(neg_ar, cp_b)
+    y_pred = fused_confidences.argmax(axis=-1)
+    uar = recall_score(y_true, y_pred, average="macro")
+    print(
+        f"Best score of {round(uar, 4) * 100}%  UAR is found using dist={dist}.")
+
+    return fused_confidences.argmax(axis=-1)
+
+
 def score_fusion(y_true: list, cp_a: np.array, cp_b: np.array):
     best_uar = 0
     best_gamma = 0
+    best_pred = []
     for gamma in range(0, 105, 5):
         gamma = gamma / 100
         fused_confidences = gamma * cp_a + (1 - gamma) * cp_b
         y_pred = fused_confidences.argmax(axis=-1)
         uar = recall_score(y_true, y_pred, average="macro")
+        # TODO CHANGE BACK
+        # uar = accuracy_score(y_true, y_pred)
         if uar > best_uar:
             best_uar = uar
             best_gamma = gamma
+            best_pred = y_pred
 
-    print(f"Best score of {round(best_uar, 4) * 100}%  UAR is found using gamma={best_gamma}.")
+    print(
+        f"Best score of {round(best_uar, 4) * 100}%  UAR is found using gamma={best_gamma}.")
+    return best_pred
 
-def test_score_fusion(cp_a: np.array, cp_b: np.array, gamma):
+
+def test_score_fusion(y_true, cp_a: np.array, cp_b: np.array, gamma):
     fused_confidences = gamma * cp_a + (1 - gamma) * cp_b
+    y_pred = fused_confidences.argmax(axis=-1)
+    uar = recall_score(y_true, y_pred, average="macro")
+    print(
+        f"Score fusion using gamma={gamma} gives {round(uar, 4) * 100}% UAR.")
     return fused_confidences.argmax(axis=-1)
 
-def svm_scorefusion(y_true: list, cp_a: np.array, cp_b: np.array, y_true_train, cp_a_train, cp_b_train):
-    # data = np.concatenate((cp_a_train, cp_b_train), axis=1)
-    # clf = SVC()
-    # clf.fit(data, y_true_train)
-    #
-    # test_data = np.concatenate((cp_a, cp_b), axis=1)
-    # y_pred = clf.predict(test_data)
-    # uar = recall_score(y_true, y_pred, average="macro")
 
-    data = np.concatenate((cp_a, cp_b), axis=1)
-    clf = SVC()
-    scores = cross_val_score(clf, data, y_true, cv=5)
-    print(statistics.mean(scores))
+# def svm_scorefusion(y_true: list, cp_a: np.array, cp_b: np.array, y_true_train, cp_a_train, cp_b_train):
+#     # data = np.concatenate((cp_a_train, cp_b_train), axis=1)
+#     # clf = SVC()
+#     # clf.fit(data, y_true_train)
+#     #
+#     # test_data = np.concatenate((cp_a, cp_b), axis=1)
+#     # y_pred = clf.predict(test_data)
+#     # uar = recall_score(y_true, y_pred, average="macro")
+#
+#     data = np.concatenate((cp_a, cp_b), axis=1)
+#     clf = SVC()
+#     scores = cross_val_score(clf, data, y_true, cv=5)
+#     print(statistics.mean(scores))
 
 
 class PFI:
-    def __init__(self, ELM, x_dev, y_dev, old_score, gmm_components, pca_comp):
-        self.model = ELM
+    def __init__(self, elm, x_dev, y_dev, old_score, gmm_components, pca_comp):
+        self.model = elm
         self.x_dev = x_dev
         self.y_dev = y_dev
         self.gmm_comp = gmm_components
@@ -155,14 +238,16 @@ class PFI:
             feature_importances.append((comp, score))
 
         feature_dict = dict(feature_importances)
-        features_ordered = [k for k, v in sorted(feature_dict.items(), key=lambda item: item[1])]
+        features_ordered = [k for k, v in sorted(
+            feature_dict.items(), key=lambda item: item[1])]
+
         self.order = features_ordered
 
     def update_data(self, data_loc):
-        with open(data_loc, "rb") as f:
+        with open(data_loc+".pickle", "rb") as f:
             data = pickle.load(f)
         organized_data = self.re_organize_data(data)
-        with open(data_loc, "wb") as f:
+        with open(data_loc+"_pfi.pickle", "wb") as f:
             pickle.dump(organized_data, f)
 
     def re_organize_data(self, dataset):
@@ -178,19 +263,23 @@ class PFI:
         arr = self.x_dev.copy()
         start_i = 2 * self.pca_comp * gmm_comp
         stop_i = start_i + 2 * self.pca_comp
-        np.random.shuffle(arr[:, start_i:stop_i])
+        np.random.seed(42)
+
+        np.apply_along_axis(np.random.shuffle, 0, arr[:, start_i:stop_i])
+        assert not np.array_equal(arr, self.x_dev)
         return arr
 
     def calculate_score(self, x_mutated):
         pred_probss = self.model.predict(x_mutated)
-        predd = np.argmax(pred_probss, axis=1)
-        new_score = recall_score(self.y_dev, predd, average="macro")
-        score_dif = self.old_score - new_score
-        return score_dif
+        preddd = np.argmax(pred_probss, axis=1)
+        new_score = recall_score(self.y_dev, preddd, average="macro")
+        score_dif = new_score - self.old_score
+        return score_dif  # larger negative difference indicates more importance of the feature
 
 
 class CascadedNormalizer:
-    def __init__(self, x_train: np.array, x_test: np.array, feature_lvl: str = None, value_lvl: str = None, instance_lvl: str = None, power_gamma: float = 1):
+    def __init__(self, x_train: np.array, x_test: np.array, feature_lvl: str = None, value_lvl: str = None,
+                 instance_lvl: str = None, power_gamma: float = 1):
         self.x_train = x_train
         self.x_test = x_test
 
@@ -217,154 +306,53 @@ class CascadedNormalizer:
 
     def __value_norm(self):
         if self.value_lvl == "power" and self.power_gamma != -1:
-            self.x_train = np.multiply(np.sign(self.x_train), np.power(np.abs(self.x_train), self.power_gamma))
-            self.x_test = np.multiply(np.sign(self.x_test), np.power(np.abs(self.x_test), self.power_gamma))
+            self.x_train = np.multiply(np.sign(self.x_train), np.power(
+                np.abs(self.x_train), self.power_gamma))
+            self.x_test = np.multiply(np.sign(self.x_test), np.power(
+                np.abs(self.x_test), self.power_gamma))
         else:
             pass
 
     def __instance_norm(self):
         if self.instance_lvl == "l2":
-            self.x_train = preprocessing.normalize(self.x_train, norm=self.instance_lvl)
-            self.x_test = preprocessing.normalize(self.x_test, norm=self.instance_lvl)
+            self.x_train = preprocessing.normalize(
+                self.x_train, norm=self.instance_lvl)
+            self.x_test = preprocessing.normalize(
+                self.x_test, norm=self.instance_lvl)
         else:
             pass
 
 
-class DataLoader:
-    def __init__(self, train_set: str, test_set: str, ling_model: str = "", linguistic_utt: str = "",
-                 acoustic_utt: str = "", utt_functionals: str = ""):
-        self.train_set = train_set
-        self.test_set = test_set
-
-        self.ling_model = ling_model
-        self.linguistic_utt = linguistic_utt
-        self.acoustic_utt = acoustic_utt
-        self.utt_functionals = utt_functionals
-        assert self.linguistic_utt or self.acoustic_utt or self.utt_functionals, "There is no data to extract."
-
-        self.label_encoder = preprocessing.LabelEncoder()
-        if self.utt_functionals:
-            self.selected_cols = self.__select_5300()
-
-    def construct_feature_set(self):
-        if self.train_set == "train_devel":
-            x_train = self.__get_features("train")
-            x_devel = self.__get_features("devel")
-            x_train = np.concatenate((x_train, x_devel), axis=0)
-
-            y_train = self.__read_labels("train")
-            y_devel = self.__read_labels("devel")
-            y_train = np.concatenate((y_train, y_devel), axis=0)
-        else:
-            x_train = self.__get_features(self.train_set)
-            y_train = self.__read_labels(self.train_set)
-
-        x_test = self.__get_features(self.test_set)
-        y_test = self.__read_labels(self.test_set)
-        return x_train, x_test, y_train, y_test
-
-    def __get_features(self, t_d_t: str) -> np.array:
-        nr_of_rows = self.__determine_size(t_d_t)
-        features = np.empty((nr_of_rows, 0))
-
-        if self.linguistic_utt:
-            ling_f = self.__read_fv_features(self.ling_model, t_d_t, self.linguistic_utt)
-            features = np.concatenate((features, ling_f), axis=1)
-        if self.acoustic_utt:
-            acou_f = self.__read_fv_features("acoustic", t_d_t, self.acoustic_utt)
-            features = np.concatenate((features, acou_f), axis=1)
-        if self.utt_functionals:
-            func_f = self.__read_utt_functionals(t_d_t)
-            features = np.concatenate((features, func_f), axis=1)
-
-        return features
-
-    @staticmethod
-    def __read_fv_features(model: str, t_d_t: str, specs: str) -> np.array:
-        file_loc = f"data/embeddings_pickle/{model}_{t_d_t}_{specs}.pickle"
-        with open(file_loc, "rb") as f:
-            features = pickle.load(f)
-        return features
-
-    def __read_utt_functionals(self, t_d_t: str) -> np.array:
-        if self.utt_functionals == "compare":
-            file_loc = f"data/features_csv/{self.utt_functionals}_{t_d_t}.csv"
-            df = pd.read_csv(file_loc)
-            features = df.values
-            features = features[:, self.selected_cols]
-        else:
-            df = pd.read_csv("data/features_csv/mfcc_rastaplpc_10functionals.csv", header=None)  # Slightly inefficient
-            df = df.drop(df.columns[0], axis=1)
-            if t_d_t == "train":
-                features = df.tail(3300)
-            elif t_d_t == "devel":
-                features = df.head(965)
-            else:  # t_d_t == "test"
-                features = df.iloc[965:965 + 867, ]
-        return features
-
-    def __read_labels(self, t_d_t: str) -> np.array:
-        file_loc = f"data/labels_csv/{t_d_t}_labels.csv"
-        if t_d_t != "test":
-            df = pd.read_csv(file_loc)
-        else:
-            df = pd.read_csv(file_loc, delimiter=";")
-        labels = df["L1"].values
-
-        if t_d_t == "train":
-            labels = self.label_encoder.fit_transform(labels)
-        else:
-            labels = self.label_encoder.transform(labels)
-        return labels
-
-    @staticmethod
-    def __determine_size(t_d_t):
-        if t_d_t == "train":
-            size = 3300
-        elif t_d_t == "devel":
-            size = 965
-        elif t_d_t == "train_devel":
-            size = 3300 + 965
-        elif t_d_t == "test":
-            size = 867
-        else:
-            size = 0
-        assert size != 0
-        return size
-
-    @staticmethod
-    def __select_5300():
-        cols = pd.read_csv("data/features_csv/feature_ranking_5300.csv", header=None).values
-        cols = cols.transpose()[0]
-        return cols
-
-
 if __name__ == "__main__":
-    dl = DataLoader(train_set="train", test_set="devel", ling_model="bert", linguistic_utt="words_400pca_64gmm_fv",
-                    acoustic_utt="", utt_functionals="")
-    a, b, c, d = dl.construct_feature_set()
+    os.chdir("..")
+    llds = "words_wav2vec2_400pca_128gmm_fv"
+    bert_model = "acoustic"
+    config_pipe_1_m = Config(train_set="train", test_set="devel", acoustic_llds=llds,
+                             acoustic_functionals="", acoustic_pca=400, acoustic_gmm=128, acoustic_pfi=0, bert_model=bert_model,
+                             linguistic_llds="", linguistic_functionals="", linguistic_pca=400,
+                             linguistic_gmm=128, linguistic_pfi=0, overwrite_pca=False, overwrite_gmm=False,
+                             overwrite_pfi=False, elm_c=[1], power_norm_gamma=[0.5])
+    dl_m = DataLoader(config_pipe_1_m)
+    a, b, cc, d = dl_m.construct_feature_set()
     a, b = CascadedNormalizer(a, b, "z", "power", "l2", 0.5).normalize()
-    model = ELM(c=4)
-    model.fit(a, c)
+    modell = ELM(c=1)
+    modell.fit(a, cc)
 
-    #TODO: include permutation feature importance in pipeline
-    pred_probs = model.predict(b)
-    pred = np.argmax(pred_probs, axis=1)
-    pred_score = recall_score(d, pred, average="macro")
+    pred_probs = modell.predict(b)
+    predd = np.argmax(pred_probs, axis=1)
+    pred_score = recall_score(d, predd, average="macro")
     print(pred_score)
 
-    pfi = PFI(model, b, d, pred_score, 64, 400)
+    pfi = PFI(modell, b, d, pred_score, config_pipe_1_m.linguistic_gmm,
+              config_pipe_1_m.linguistic_pca)
     pfi.feature_performance()
-    pfi.update_data("data/embeddings_pickle/bert_train_words_400pca_64gmm_fv.pickle")
-    pfi.update_data("data/embeddings_pickle/bert_devel_words_400pca_64gmm_fv.pickle")
-    pfi.update_data("data/embeddings_pickle/bert_test_words_400pca_64gmm_fv.pickle")
+    pfi.update_data(f"data/embeddings_pickle/{bert_model}_train_{llds}")
+    pfi.update_data(f"data/embeddings_pickle/{bert_model}_devel_{llds}")
+    pfi.update_data(f"data/embeddings_pickle/{bert_model}_test_{llds}")
 
-    pass
     # ml = ModelLearning(bert_model="sbert", test="devel", data_extension="sentences", c=0.8, acoustic_functionals=True)
     # ml.normalize_data(feature_level="z", value_level="power", instance_level="l2", a=0.6)
     # pred = ml.fit_predict()
 
     # print(recall_score(ml.y_test, pred, average="macro"))
     # score_fusion([0, 0, 0, 0, 0, 0, 0, 0], np.random.rand(8, 4), np.random.rand(8, 4))
-
-

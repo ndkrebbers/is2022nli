@@ -87,6 +87,8 @@ class WordAlignedAcoustics:
 
 
 if __name__ == "__main__":
+    os.chdir("..")
+    os.chdir("..")
     for ds in ["train", "devel", "test"]:
         wa = WordAlignedAcoustics("data/acoustic_lld_csv/", ds)
         wa.calculate_word_functionals()
